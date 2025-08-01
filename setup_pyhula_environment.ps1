@@ -229,6 +229,35 @@ function Install-PyHula {
     }
 }
 
+function Apply-PyHulaPatchs {
+    param([string]$VenvPath)
+    
+    Write-Status "Applying PyHula compatibility patches..."
+    
+    $pythonPath = Join-Path $VenvPath "Scripts\python.exe"
+    $patcherScript = Join-Path $ScriptRoot "pyhula_patcher.py"
+    
+    if (-not (Test-Path $patcherScript)) {
+        Write-Warning-Safe "Patcher script not found. PyHula may have compatibility issues."
+        return $false
+    }
+    
+    try {
+        # Apply patches
+        & $pythonPath $patcherScript --patch
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "PyHula patches applied successfully"
+            return $true
+        } else {
+            Write-Warning-Safe "Some PyHula patches failed to apply"
+            return $false
+        }
+    } catch {
+        Write-Warning-Safe "Could not apply PyHula patches: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Create-ActivationScripts {
     param([string]$VenvPath)
     
@@ -360,6 +389,70 @@ if __name__ == "__main__":
         }
     }
     
+    # Copy runtime patcher files
+    $patcherFiles = @(
+        "pyhula_runtime_patcher.py",
+        "pyhula_fixed.py", 
+        "test_fixed_pyhula.py"
+    )
+    
+    foreach ($file in $patcherFiles) {
+        $sourcePath = Join-Path $ScriptRoot $file
+        $destPath = Join-Path $WorkingDir $file
+        
+        if (Test-Path $sourcePath) {
+            Copy-Item $sourcePath $destPath -Force
+            Write-Status "Copied runtime patcher: $file"
+        }
+    }
+    
+    # Update test script to use runtime patches
+    $improvedTestContent = @"
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+PyHula Installation Test with Runtime Patches
+"""
+
+def main():
+    print("PyHula Installation Test")
+    print("=" * 30)
+    
+    # Test patched version
+    try:
+        import pyhula_fixed as pyhula
+        print("✓ Patched PyHula imported successfully")
+        
+        api = pyhula.create_api()
+        print("✓ Patched API created successfully")
+        
+        # Test connection
+        print("Testing connection...")
+        result = api.connect("192.168.100.1")
+        print(f"Connection result: {result}")
+        
+        print("\n🎉 PyHula with runtime patches is working!")
+        
+    except Exception as e:
+        print(f"✗ Test failed: {e}")
+        print("\nTrying fallback to original PyHula...")
+        
+        try:
+            import pyhula
+            api = pyhula.UserApi()
+            print("✓ Original PyHula available (may have struct errors)")
+        except Exception as e2:
+            print(f"✗ Original PyHula also failed: {e2}")
+    
+    print("\nPress Enter to exit...")
+    input()
+
+if __name__ == "__main__":
+    main()
+"@
+    
+    $improvedTestContent | Out-File -FilePath (Join-Path $WorkingDir "test_pyhula.py") -Encoding UTF8 -Force
+    
     Write-Status "Activation scripts created in: $WorkingDir"
 }
 
@@ -415,6 +508,9 @@ try {
     
     # Install PyHula
     Install-PyHula -VenvPath $venvPath
+    
+    # Apply patches
+    Apply-PyHulaPatchs -VenvPath $venvPath
     
     # Create activation scripts
     Create-ActivationScripts -VenvPath $venvPath
