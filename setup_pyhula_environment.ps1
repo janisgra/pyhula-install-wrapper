@@ -1,506 +1,439 @@
-# PyHula Environment Setup Script for Students
-# Compatible with Windows 11 and international system configurations
-# Requires PowerShell 5.1 or higher
-
-#Requires -Version 5.1
+#!/usr/bin/env powershell
+# PyHula Environment Setup Script
+# Sets up Python 3.6 environment with PyHula library for drone control
 
 param(
-    [string]$InstallPath = "$env:USERPROFILE\PyHulaEnvironment",
+    [switch]$SkipPythonInstall = $false,
     [switch]$Force = $false,
+    [string]$InstallPath = "",
     [switch]$Verbose = $false
 )
 
-# Set error handling and encoding
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+$ProgressPreference = "SilentlyContinue"
 
 # Script configuration
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Python36Installer = Join-Path $ScriptDir "python-3.6.7-amd64.exe"
-$PyHulaWheel = Join-Path $ScriptDir "pyhula-1.1.7-cp36-cp36m-win_amd64.whl"
-$VenvName = "pyhula_env"
-$VenvPath = Join-Path $InstallPath $VenvName
+$RequiredPythonVersion = "3.6"
+$PyHulaWheelFile = "pyhula-1.1.7-cp36-cp36m-win_amd64.whl"
+$PythonInstallerFile = "python-3.6.7-amd64.exe"
+$VenvName = "pyhula-env"
 
-# Color functions for better output
-function Write-Success($message) {
-    Write-Host "✓ $message" -ForegroundColor Green
+# Paths
+$ScriptRoot = $PSScriptRoot
+$HulaPythonDir = Join-Path $ScriptRoot "Hula python"
+$PythonInstallerDir = Join-Path $ScriptRoot "python-368_installer"
+$WorkingDir = if ($InstallPath) { $InstallPath } else { Join-Path $env:USERPROFILE "PyHula" }
+
+function Write-Status {
+    param([string]$Message, [string]$Color = "Green")
+    Write-Host "[PyHula Setup] $Message" -ForegroundColor $Color
 }
 
-function Write-Info($message) {
-    Write-Host "ℹ $message" -ForegroundColor Cyan
+function Write-Error-Safe {
+    param([string]$Message)
+    Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
-function Write-Warning($message) {
-    Write-Host "⚠ $message" -ForegroundColor Yellow
+function Write-Warning-Safe {
+    param([string]$Message)
+    Write-Host "[WARNING] $Message" -ForegroundColor Yellow
 }
 
-function Write-Error($message) {
-    Write-Host "✗ $message" -ForegroundColor Red
-}
-
-function Write-Step($step, $message) {
-    Write-Host "`n[$step] $message" -ForegroundColor Magenta
-}
-
-# Check if running as administrator
-function Test-Administrator {
+function Test-AdminRights {
     $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# Download file with progress
-function Download-File($url, $destination) {
-    try {
-        Write-Info "Downloading $(Split-Path $destination -Leaf)..."
-        $webClient = New-Object System.Net.WebClient
-        $webClient.DownloadFile($url, $destination)
-        Write-Success "Download completed"
-    }
-    catch {
-        Write-Error "Failed to download file: $($_.Exception.Message)"
-        throw
-    }
-}
-
-# Check if Python 3.6 is available
-function Test-Python36 {
-    try {
-        $pythonVersions = @()
-        
-        # Check common Python installation paths
-        $commonPaths = @(
-            "$env:LOCALAPPDATA\Programs\Python\Python36\python.exe",
-            "$env:PROGRAMFILES\Python36\python.exe",
-            "$env:PROGRAMFILES(X86)\Python36\python.exe"
-        )
-        
-        foreach ($path in $commonPaths) {
-            if (Test-Path $path) {
+function Find-PythonInstallation {
+    $pythonPaths = @(
+        "${env:ProgramFiles}\Python36\python.exe",
+        "${env:ProgramFiles(x86)}\Python36\python.exe",
+        "${env:LOCALAPPDATA}\Programs\Python\Python36\python.exe",
+        "${env:USERPROFILE}\AppData\Local\Programs\Python\Python36\python.exe"
+    )
+    
+    foreach ($path in $pythonPaths) {
+        if (Test-Path $path) {
+            try {
                 $version = & $path --version 2>&1
-                if ($version -match "Python 3\.6\.") {
+                if ($version -match "Python 3\.6") {
+                    Write-Status "Found Python 3.6 at: $path"
                     return $path
                 }
+            } catch {
+                continue
             }
         }
-        
-        # Check PATH
-        try {
-            $pathPython = Get-Command python -ErrorAction SilentlyContinue
-            if ($pathPython) {
-                $version = & $pathPython.Source --version 2>&1
-                if ($version -match "Python 3\.6\.") {
-                    return $pathPython.Source
-                }
-            }
-        }
-        catch {
-            # Ignore errors when checking PATH
-        }
-        
-        return $null
     }
-    catch {
-        return $null
+    
+    # Check PATH
+    try {
+        $version = python --version 2>&1
+        if ($version -match "Python 3\.6") {
+            $pythonPath = (Get-Command python -ErrorAction SilentlyContinue).Source
+            Write-Status "Found Python 3.6 in PATH: $pythonPath"
+            return "python"
+        }
+    } catch {
+        # Python not in PATH
     }
+    
+    return $null
 }
 
-# Install Python 3.6
 function Install-Python36 {
-    param($installerPath)
+    Write-Status "Installing Python 3.6..."
     
-    if (-not (Test-Path $installerPath)) {
-        Write-Error "Python 3.6 installer not found at: $installerPath"
-        Write-Info "Please ensure the python-3.6.7-amd64.exe file is in the same directory as this script"
-        throw "Python installer not found"
+    # Find installer
+    $installerPath = $null
+    $possibleInstallers = @(
+        (Join-Path $HulaPythonDir $PythonInstallerFile),
+        (Join-Path $PythonInstallerDir "python-3.6.8-amd64.exe"),
+        (Join-Path $PythonInstallerDir "python-3.6.8.exe")
+    )
+    
+    foreach ($installer in $possibleInstallers) {
+        if (Test-Path $installer) {
+            $installerPath = $installer
+            break
+        }
     }
     
-    Write-Info "Installing Python 3.6.7..."
-    Write-Warning "This may require administrator privileges and take several minutes"
+    if (-not $installerPath) {
+        throw "Python 3.6 installer not found. Please ensure the installer is in the 'Hula python' or 'python-368_installer' directory."
+    }
     
+    Write-Status "Using installer: $installerPath"
+    
+    # Install Python silently
     $installArgs = @(
         "/quiet",
         "InstallAllUsers=0",
-        "PrependPath=0",
+        "PrependPath=1",
         "Include_test=0",
         "Include_doc=0",
         "Include_dev=0",
         "Include_debug=0",
-        "Include_launcher=0",
-        "InstallLauncherAllUsers=0",
-        "TargetDir=$env:LOCALAPPDATA\Programs\Python\Python36"
+        "Include_launcher=1",
+        "InstallLauncherAllUsers=0"
     )
     
     try {
         $process = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
         if ($process.ExitCode -eq 0) {
-            Write-Success "Python 3.6.7 installed successfully"
-            return "$env:LOCALAPPDATA\Programs\Python\Python36\python.exe"
-        }
-        else {
+            Write-Status "Python 3.6 installed successfully"
+            Start-Sleep -Seconds 5  # Wait for installation to complete
+        } else {
             throw "Python installation failed with exit code: $($process.ExitCode)"
         }
-    }
-    catch {
-        Write-Error "Failed to install Python: $($_.Exception.Message)"
-        throw
+    } catch {
+        throw "Failed to install Python 3.6: $($_.Exception.Message)"
     }
 }
 
-# Create virtual environment
-function New-VirtualEnvironment($pythonPath, $venvPath) {
-    Write-Info "Creating virtual environment at: $venvPath"
+function Create-VirtualEnvironment {
+    param([string]$PythonPath)
+    
+    $venvPath = Join-Path $WorkingDir $VenvName
     
     if (Test-Path $venvPath) {
         if ($Force) {
-            Write-Warning "Removing existing virtual environment"
+            Write-Status "Removing existing virtual environment..."
             Remove-Item $venvPath -Recurse -Force
-        }
-        else {
-            Write-Error "Virtual environment already exists at: $venvPath"
-            Write-Info "Use -Force parameter to overwrite existing environment"
-            throw "Virtual environment exists"
+        } else {
+            Write-Status "Virtual environment already exists at: $venvPath"
+            return $venvPath
         }
     }
     
-    # Ensure parent directory exists
-    $parentDir = Split-Path $venvPath -Parent
-    if (-not (Test-Path $parentDir)) {
-        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    Write-Status "Creating virtual environment at: $venvPath"
+    
+    if (-not (Test-Path $WorkingDir)) {
+        New-Item -ItemType Directory -Path $WorkingDir -Force | Out-Null
     }
     
     try {
-        & $pythonPath -m venv $venvPath
-        Write-Success "Virtual environment created successfully"
-    }
-    catch {
-        Write-Error "Failed to create virtual environment: $($_.Exception.Message)"
-        throw
+        & $PythonPath -m venv $venvPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Virtual environment creation failed"
+        }
+        Write-Status "Virtual environment created successfully"
+        return $venvPath
+    } catch {
+        throw "Failed to create virtual environment: $($_.Exception.Message)"
     }
 }
 
-# Activate virtual environment and return paths
-function Get-VenvPaths($venvPath) {
-    $pythonExe = Join-Path $venvPath "Scripts\python.exe"
-    $pipExe = Join-Path $venvPath "Scripts\pip.exe"
-    $activateScript = Join-Path $venvPath "Scripts\Activate.ps1"
+function Install-PyHula {
+    param([string]$VenvPath)
     
-    return @{
-        Python = $pythonExe
-        Pip = $pipExe
-        Activate = $activateScript
+    $wheelPath = Join-Path $HulaPythonDir $PyHulaWheelFile
+    
+    if (-not (Test-Path $wheelPath)) {
+        throw "PyHula wheel file not found at: $wheelPath"
     }
-}
-
-# Install packages in virtual environment
-function Install-Packages($pipPath, $wheelPath) {
-    Write-Info "Upgrading pip..."
+    
+    $pipPath = Join-Path $VenvPath "Scripts\pip.exe"
+    $pythonPath = Join-Path $VenvPath "Scripts\python.exe"
+    
+    if (-not (Test-Path $pipPath)) {
+        throw "pip.exe not found in virtual environment: $pipPath"
+    }
+    
+    Write-Status "Installing PyHula and dependencies..."
+    
+    # Upgrade pip first
     try {
-        & $pipPath install --upgrade pip --quiet
-        Write-Success "Pip upgraded successfully"
-    }
-    catch {
-        Write-Warning "Could not upgrade pip: $($_.Exception.Message)"
+        & $pipPath install --upgrade pip
+        Write-Status "pip upgraded successfully"
+    } catch {
+        Write-Warning-Safe "Could not upgrade pip: $($_.Exception.Message)"
     }
     
-    Write-Info "Installing essential packages..."
-    $packages = @(
-        "wheel",
-        "setuptools",
-        "cython",
-        "numpy",
-        "matplotlib",
-        "jupyter",
-        "ipython",
-        "opencv-python",  # For computer vision/camera processing
-        "pillow",         # For image processing
-        "scipy",          # Scientific computing
-        "pandas"          # Data analysis
-    )
-    
-    foreach ($package in $packages) {
+    # Install common dependencies
+    $dependencies = @("numpy", "matplotlib", "opencv-python")
+    foreach ($package in $dependencies) {
         try {
-            Write-Info "Installing $package..."
-            & $pipPath install $package --quiet
-            Write-Success "$package installed"
-        }
-        catch {
-            Write-Warning "Could not install $package: $($_.Exception.Message)"
+            Write-Status "Installing $package..."
+            & $pipPath install $package
+            if ($LASTEXITCODE -eq 0) {
+                Write-Status "$package installed successfully"
+            } else {
+                Write-Warning-Safe "Could not install $package"
+            }
+        } catch {
+            Write-Warning-Safe "Could not install $package - $($_.Exception.Message)"
         }
     }
     
     # Install PyHula wheel
-    if (Test-Path $wheelPath) {
-        Write-Info "Installing PyHula library..."
-        try {
-            & $pipPath install $wheelPath --force-reinstall --quiet
-            Write-Success "PyHula library installed successfully"
+    try {
+        Write-Status "Installing PyHula from wheel file..."
+        & $pipPath install $wheelPath
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "PyHula installed successfully"
+        } else {
+            throw "PyHula installation failed"
         }
-        catch {
-            Write-Error "Failed to install PyHula: $($_.Exception.Message)"
-            throw
-        }
+    } catch {
+        throw "Failed to install PyHula: $($_.Exception.Message)"
     }
-    else {
-        Write-Error "PyHula wheel file not found at: $wheelPath"
-        throw "PyHula wheel not found"
+    
+    # Verify installation
+    try {
+        & $pythonPath -c "import pyhula; print('PyHula version:', pyhula.__version__ if hasattr(pyhula, '__version__') else 'unknown')"
+        Write-Status "PyHula installation verified"
+    } catch {
+        Write-Warning-Safe "Could not verify PyHula installation"
     }
 }
 
-# Create activation batch file for easy access
-function New-ActivationBatch($venvPath, $installPath) {
+function Create-ActivationScripts {
+    param([string]$VenvPath)
+    
+    $activateScript = Join-Path $WorkingDir "activate_pyhula.bat"
+    $activatePsScript = Join-Path $WorkingDir "activate_pyhula.ps1"
+    $startPythonScript = Join-Path $WorkingDir "start_python.bat"
+    $testScript = Join-Path $WorkingDir "test_pyhula.py"
+    
+    # Create batch activation script
     $batchContent = @"
 @echo off
-cd /d "$installPath"
-call "$venvPath\Scripts\activate.bat"
-echo.
-echo ===============================================
-echo   PyHula Environment Activated
-echo ===============================================
-echo.
-echo Python version:
-python --version
-echo.
-echo PyHula status:
-python -c "import pyhula; print('PyHula version:', pyhula.get_version().strip())"
-echo.
-echo Available packages:
-pip list | findstr -i "pyhula numpy matplotlib jupyter opencv"
-echo.
-echo Network interfaces (for drone connection):
-ipconfig | findstr "IPv4"
-echo.
-echo ===============================================
-echo   Quick Start Commands:
-echo ===============================================
-echo To start Jupyter Notebook:     jupyter notebook
-echo To run PyHula examples:        python pyhula_basic_examples.py
-echo To run comprehensive tutorial: python pyhula_comprehensive_tutorial.py
-echo To test installation:          python test_pyhula_installation.py
-echo To deactivate environment:     deactivate
-echo.
-echo For network setup help, see:   network_setup_guide.md
-echo.
+echo Activating PyHula environment...
+call "$($VenvPath)\Scripts\activate.bat"
+echo PyHula environment activated!
+echo To test PyHula, run: python test_pyhula.py
 cmd /k
 "@
     
-    $batchFile = Join-Path $installPath "start_pyhula_environment.bat"
-    $batchContent | Out-File -FilePath $batchFile -Encoding ASCII
-    Write-Success "Created activation batch file: $batchFile"
-    return $batchFile
-}
-
-# Create PowerShell activation script
-function New-ActivationScript($venvPath, $installPath) {
-    $scriptContent = @"
+    $batchContent | Out-File -FilePath $activateScript -Encoding ASCII
+    
+    # Create PowerShell activation script
+    $psContent = @"
 # PyHula Environment Activation Script
-Set-Location "$installPath"
-& "$venvPath\Scripts\Activate.ps1"
-
-Write-Host ""
-Write-Host "===============================================" -ForegroundColor Green
-Write-Host "   PyHula Environment Activated" -ForegroundColor Green  
-Write-Host "===============================================" -ForegroundColor Green
-Write-Host ""
-
-Write-Host "Python version:" -ForegroundColor Cyan
-python --version
-
-Write-Host ""
-Write-Host "PyHula library status:" -ForegroundColor Cyan
-try {
-    python -c "import pyhula; print('Version:', pyhula.get_version().strip()); api = pyhula.UserApi(); print('UserApi: Ready for drone connection')"
-} catch {
-    Write-Host "Error testing PyHula" -ForegroundColor Red
-}
-
-Write-Host ""
-Write-Host "Network interfaces (for drone connection):" -ForegroundColor Cyan
-Get-NetIPAddress -AddressFamily IPv4 | Where-Object {`$_.InterfaceAlias -like "*Wi-Fi*" -or `$_.InterfaceAlias -like "*Ethernet*"} | Select-Object InterfaceAlias, IPAddress | Format-Table
-
-Write-Host ""
-Write-Host "===============================================" -ForegroundColor Yellow
-Write-Host "   Quick Start Commands:" -ForegroundColor Yellow
-Write-Host "===============================================" -ForegroundColor Yellow
-Write-Host "Start Jupyter Notebook: " -NoNewline
-Write-Host "jupyter notebook" -ForegroundColor White
-Write-Host "Run PyHula examples: " -NoNewline
-Write-Host "python pyhula_basic_examples.py" -ForegroundColor White
-Write-Host "Run comprehensive tutorial: " -NoNewline
-Write-Host "python pyhula_comprehensive_tutorial.py" -ForegroundColor White
-Write-Host "Test installation: " -NoNewline
-Write-Host "python test_pyhula_installation.py" -ForegroundColor White
-Write-Host "Deactivate environment: " -NoNewline  
-Write-Host "deactivate" -ForegroundColor White
-Write-Host ""
-Write-Host "For network setup help, see: " -NoNewline
-Write-Host "network_setup_guide.md" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "Activating PyHula environment..." -ForegroundColor Green
+& "$($VenvPath)\Scripts\Activate.ps1"
+Write-Host "PyHula environment activated!" -ForegroundColor Green
+Write-Host "To test PyHula, run: python test_pyhula.py" -ForegroundColor Yellow
 "@
     
-    $scriptFile = Join-Path $installPath "start_pyhula_environment.ps1"
-    $scriptContent | Out-File -FilePath $scriptFile -Encoding UTF8
-    Write-Success "Created activation PowerShell script: $scriptFile"
-    return $scriptFile
-}
+    $psContent | Out-File -FilePath $activatePsScript -Encoding UTF8
+    
+    # Create start Python script
+    $startPythonContent = @"
+@echo off
+echo Starting Python with PyHula environment...
+call "$($VenvPath)\Scripts\activate.bat"
+python
+"@
+    
+    $startPythonContent | Out-File -FilePath $startPythonScript -Encoding ASCII
+    
+    # Create test script
+    $testPythonContent = @"
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+PyHula Installation Test Script
+Tests basic PyHula functionality
+"""
 
-# Test PyHula installation
-function Test-PyHulaInstallation($pythonPath) {
-    Write-Info "Testing PyHula installation..."
-    try {
-        # Test basic import
-        $importTest = & $pythonPath -c "import pyhula; print('Import successful')" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "PyHula import failed: $importTest"
-            return $false
-        }
+def test_pyhula_import():
+    """Test if PyHula can be imported"""
+    try:
+        import pyhula
+        print("✓ PyHula imported successfully")
         
-        # Test version retrieval
-        $versionTest = & $pythonPath -c "import pyhula; print('Version:', pyhula.get_version().strip())" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Success "PyHula version test successful:"
-            Write-Host "  $versionTest" -ForegroundColor White
-        } else {
-            Write-Warning "Could not get PyHula version: $versionTest"
-        }
-        
-        # Test UserApi creation
-        $apiTest = & $pythonPath -c "import pyhula; api = pyhula.UserApi(); print('UserApi created successfully')" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Success "UserApi creation test successful:"
-            Write-Host "  $apiTest" -ForegroundColor White
-        } else {
-            Write-Warning "UserApi creation failed: $apiTest"
-        }
-        
-        return $true
-        
-    }
-    catch {
-        Write-Warning "Could not test PyHula: $($_.Exception.Message)"
-        return $false
-    }
-}
+        # Try to get version if available
+        if hasattr(pyhula, '__version__'):
+            print(f"  Version: {pyhula.__version__}")
+        else:
+            print("  Version: unknown")
+        return True
+    except ImportError as e:
+        print(f"✗ Failed to import PyHula: {e}")
+        return False
 
-# Copy example files and documentation
-function Copy-ExampleFiles($installPath, $scriptDir) {
-    $exampleFiles = @(
-        "test_pyhula_installation.py",
-        "QUICK_REFERENCE.md"
+def test_dependencies():
+    """Test if common dependencies are available"""
+    dependencies = ['numpy', 'cv2', 'matplotlib']
+    success = True
+    
+    for dep in dependencies:
+        try:
+            if dep == 'cv2':
+                import cv2
+                print(f"✓ OpenCV imported successfully (version: {cv2.__version__})")
+            else:
+                module = __import__(dep)
+                version = getattr(module, '__version__', 'unknown')
+                print(f"✓ {dep} imported successfully (version: {version})")
+        except ImportError:
+            print(f"✗ {dep} not available")
+            success = False
+    
+    return success
+
+def main():
+    print("PyHula Installation Test")
+    print("=" * 30)
+    
+    pyhula_ok = test_pyhula_import()
+    print()
+    
+    deps_ok = test_dependencies()
+    print()
+    
+    if pyhula_ok and deps_ok:
+        print("🎉 All tests passed! PyHula is ready to use.")
+    else:
+        print("⚠️  Some tests failed. Please check the installation.")
+    
+    print("\nPress Enter to exit...")
+    input()
+
+if __name__ == "__main__":
+    main()
+"@
+    
+    $testPythonContent | Out-File -FilePath $testScript -Encoding UTF8
+    
+    # Copy additional files if they exist
+    $docFiles = @(
+        "Hula Python interface specifier V3_20250724.docx",
+        "Hula Python接口说明 V3_20250724.pdf", 
+        "Pyhula Software Quick Reference Guide.docx"
     )
     
-    foreach ($file in $exampleFiles) {
-        $sourcePath = Join-Path $scriptDir $file
-        $destPath = Join-Path $installPath $file
+    foreach ($file in $docFiles) {
+        $sourcePath = Join-Path $HulaPythonDir $file
+        $destPath = Join-Path $WorkingDir $file
         
         if (Test-Path $sourcePath) {
             try {
                 Copy-Item $sourcePath $destPath -Force
-                Write-Success "Copied $file to installation directory"
-            }
-            catch {
-                Write-Warning "Could not copy $file: $($_.Exception.Message)"
+                Write-Status "Copied documentation: $file"
+            } catch {
+                Write-Warning-Safe "Could not copy $file - $($_.Exception.Message)"
             }
         }
     }
     
-    Write-Success "Example files and documentation copied"
+    Write-Status "Activation scripts created in: $WorkingDir"
 }
 
-# Main installation process
-function Start-Installation {
-    Write-Host @"
-
-╔══════════════════════════════════════════════════════════════╗
-║                PyHula Environment Setup                     ║
-║              For Windows 11 Students                        ║
-╚══════════════════════════════════════════════════════════════╝
-
-"@ -ForegroundColor Cyan
-
-    Write-Info "Installation directory: $InstallPath"
-    Write-Info "Script directory: $ScriptDir"
+function Show-CompletionMessage {
+    param([string]$WorkingDir)
     
-    try {
-        # Step 1: Check for Python 3.6
-        Write-Step "1/6" "Checking for Python 3.6..."
-        $pythonPath = Test-Python36
+    Write-Host ""
+    Write-Host "=" * 60 -ForegroundColor Green
+    Write-Host "PyHula Environment Setup Complete!" -ForegroundColor Green
+    Write-Host "=" * 60 -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Installation directory: $WorkingDir" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "To use PyHula:" -ForegroundColor Yellow
+    Write-Host "1. Double-click: " -NoNewline; Write-Host "activate_pyhula.bat" -ForegroundColor White
+    Write-Host "2. Or run in PowerShell: " -NoNewline; Write-Host "start_python.bat" -ForegroundColor White
+    Write-Host ""
+    Write-Host "To test the installation:" -ForegroundColor Yellow
+    Write-Host "1. Activate the environment (option 1 above)" -ForegroundColor White
+    Write-Host "2. Run: " -NoNewline; Write-Host "python test_pyhula.py" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Documentation files have been copied to the installation directory." -ForegroundColor Cyan
+    Write-Host ""
+}
+
+# Main execution
+try {
+    Write-Status "Starting PyHula environment setup..."
+    Write-Status "Working directory: $WorkingDir"
+    
+    # Check admin rights
+    if (-not (Test-AdminRights)) {
+        Write-Warning-Safe "Running without administrator privileges. Python installation may require elevation."
+    }
+    
+    # Find or install Python 3.6
+    $pythonPath = Find-PythonInstallation
+    
+    if (-not $pythonPath -and -not $SkipPythonInstall) {
+        Install-Python36
+        Start-Sleep -Seconds 3
+        $pythonPath = Find-PythonInstallation
         
         if (-not $pythonPath) {
-            Write-Warning "Python 3.6 not found. Installing..."
-            $pythonPath = Install-Python36 -installerPath $Python36Installer
+            throw "Python 3.6 installation verification failed. Please install Python 3.6 manually."
         }
-        else {
-            Write-Success "Found Python 3.6 at: $pythonPath"
-        }
-        
-        # Step 2: Create virtual environment
-        Write-Step "2/6" "Creating virtual environment..."
-        New-VirtualEnvironment -pythonPath $pythonPath -venvPath $VenvPath
-        
-        # Step 3: Get virtual environment paths
-        Write-Step "3/6" "Setting up virtual environment paths..."
-        $venvPaths = Get-VenvPaths -venvPath $VenvPath
-        Write-Success "Virtual environment configured"
-        
-        # Step 4: Install packages
-        Write-Step "4/6" "Installing packages and PyHula library..."
-        Install-Packages -pipPath $venvPaths.Pip -wheelPath $PyHulaWheel
-        
-        # Step 5: Create activation scripts
-        Write-Step "5/6" "Creating activation scripts..."
-        $batchFile = New-ActivationBatch -venvPath $VenvPath -installPath $InstallPath
-        $scriptFile = New-ActivationScript -venvPath $VenvPath -installPath $InstallPath
-        
-        # Step 6: Test installation and create examples
-        Write-Step "6/7" "Testing PyHula installation..."
-        $testSuccess = Test-PyHulaInstallation -pythonPath $venvPaths.Python
-        
-        # Step 7: Copy example files to installation directory
-        Write-Step "7/7" "Creating example files and documentation..."
-        Copy-ExampleFiles -installPath $InstallPath -scriptDir $ScriptDir
-        
-        # Summary
-        Write-Host "`n╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-        Write-Host "║                    INSTALLATION COMPLETE                    ║" -ForegroundColor Green
-        Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
-        
-        Write-Host "`nInstallation Summary:" -ForegroundColor Cyan
-        Write-Host "• Python 3.6 Location: " -NoNewline; Write-Host $pythonPath -ForegroundColor White
-        Write-Host "• Virtual Environment: " -NoNewline; Write-Host $VenvPath -ForegroundColor White
-        Write-Host "• Batch Activation: " -NoNewline; Write-Host $batchFile -ForegroundColor White
-        Write-Host "• PowerShell Activation: " -NoNewline; Write-Host $scriptFile -ForegroundColor White
-        
-        Write-Host "`nTo start using PyHula:" -ForegroundColor Yellow
-        Write-Host "1. Double-click: " -NoNewline; Write-Host "start_pyhula_environment.bat" -ForegroundColor White
-        Write-Host "2. Or run in PowerShell: " -NoNewline; Write-Host ".\start_pyhula_environment.ps1" -ForegroundColor White
-        
-        if ($testSuccess) {
-            Write-Host "`n✅ PyHula is ready to use!" -ForegroundColor Green
-        }
-        else {
-            Write-Host "`n⚠️  PyHula installation completed but testing failed. Manual verification may be needed." -ForegroundColor Yellow
-        }
-        
+    } elseif (-not $pythonPath) {
+        throw "Python 3.6 not found and installation skipped. Please install Python 3.6 first."
     }
-    catch {
-        Write-Host "`n╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Red
-        Write-Host "║                    INSTALLATION FAILED                      ║" -ForegroundColor Red
-        Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Red
-        
-        Write-Error "Installation failed: $($_.Exception.Message)"
-        Write-Host "`nTroubleshooting tips:" -ForegroundColor Yellow
-        Write-Host "• Ensure you have internet connection for package downloads"
-        Write-Host "• Try running PowerShell as Administrator"
-        Write-Host "• Check if antivirus software is blocking the installation"
-        Write-Host "• Verify that python-3.6.7-amd64.exe and pyhula wheel are in the script directory"
-        
-        exit 1
+    
+    # Create virtual environment
+    $venvPath = Create-VirtualEnvironment -PythonPath $pythonPath
+    
+    # Install PyHula
+    Install-PyHula -VenvPath $venvPath
+    
+    # Create activation scripts
+    Create-ActivationScripts -VenvPath $venvPath
+    
+    # Show completion message
+    Show-CompletionMessage -WorkingDir $WorkingDir
+    
+} catch {
+    Write-Error-Safe "Setup failed: $($_.Exception.Message)"
+    Write-Host ""
+    Write-Host "Troubleshooting tips:" -ForegroundColor Yellow
+    Write-Host "- Ensure you have internet connection for package downloads" -ForegroundColor White
+    Write-Host "- Try running as Administrator" -ForegroundColor White
+    Write-Host "- Temporarily disable antivirus software" -ForegroundColor White
+    Write-Host "- Check that all required files are present in the script directory" -ForegroundColor White
+    Write-Host ""
+    exit 1
+} finally {
+    if ($Verbose) {
+        Write-Host "Script completed." -ForegroundColor Gray
     }
-}
-
-# Script entry point
-if ($PSCmdlet.ShouldProcess("PyHula Environment", "Install")) {
-    Start-Installation
 }
